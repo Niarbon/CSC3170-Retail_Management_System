@@ -54,14 +54,12 @@ CREATE TABLE member (
     member_name VARCHAR(100) NOT NULL,
     phone_number VARCHAR(20) NOT NULL,
     points INT NOT NULL DEFAULT 0,
-    join_date DATE NOT NULL DEFAULT (CURRENT_DATE),
+    join_date DATE NOT NULL DEFAULT '0000-00-00',
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT uq_member_phone UNIQUE (phone_number),
-    CONSTRAINT chk_member_points_nonnegative CHECK (points >= 0),
-    CONSTRAINT chk_member_phone_len CHECK (CHAR_LENGTH(phone_number) BETWEEN 6 AND 20)
-) ENGINE=InnoDB;
+    CONSTRAINT uq_member_phone UNIQUE (phone_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE product (
     product_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
