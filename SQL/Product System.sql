@@ -42,7 +42,11 @@ INSERT INTO inventory (
     min_stock,
     last_updated
 ) VALUES
-    (1, 0, 20, CURRENT_TIMESTAMP);
+(1, 0, 20, CURRENT_TIMESTAMP)
+ON DUPLICATE KEY UPDATE
+    quantity = VALUES(quantity),
+    min_stock = VALUES(min_stock),
+    last_updated = VALUES(last_updated);
 
 -- =========================================================
 -- 5. Procurement transaction with automatic stock increase
