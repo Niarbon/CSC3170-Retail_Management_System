@@ -43,24 +43,7 @@ INSERT INTO purchase_order_item (
 
 SET @purchase_item_id = LAST_INSERT_ID();
 
--- =========================================================
--- 2. Update supplier supply record
--- =========================================================
-INSERT INTO supplier_supply_record (
-    supplier_id,
-    product_id,
-    purchase_item_id,
-    unit_price,
-    quantity,
-    received_at
-) VALUES (
-    @supplier_id,
-    @product_id,
-    @purchase_item_id,
-    @unit_price,
-    @quantity,
-    CURRENT_TIMESTAMP
-);
+
 
 -- Optional but practical: inventory also increases when goods are received.
 UPDATE inventory
@@ -68,10 +51,28 @@ SET quantity = quantity + @quantity,
     last_updated = CURRENT_TIMESTAMP
 WHERE product_id = @product_id;
 
+INSERT INTO inventory_log (
+    product_id,
+    purchase_item_id,
+    transaction_item_id,
+    change_quantity,
+    balance_after,
+    change_reason,
+    created_at
+) VALUES (
+    @product_id,
+    @purchase_item_id,
+    NULL,
+    @purchase_quantity,
+    (SELECT quantity FROM inventory WHERE product_id = @product_id), -- 获取更新后的当前库存
+    'PURCHASE_RECEIPT', -- 变动原因：采购入库
+    CURRENT_TIMESTAMP
+);
+
 COMMIT;
 
 -- =========================================================
--- 3. Supplier performance analysis
+-- 2. Supplier performance analysis
 --    a) supply frequency
 --    b) average unit price comparison
 -- =========================================================
@@ -79,13 +80,13 @@ SELECT
     s.supplier_id,
     s.supplier_name,
     COUNT(DISTINCT po.purchase_order_id) AS supply_frequency,
-    SUM(poi.quantity) AS total_units_supplied,
-    ROUND(AVG(poi.unit_price), 2) AS avg_unit_price,
-    ROUND(SUM(poi.subtotal), 2) AS total_purchase_amount
+    IFNULL(SUM(poi.quantity), 0) AS total_units_supplied,
+    IFNULL(ROUND(AVG(poi.unit_price), 2), 0.00) AS avg_unit_price,
+    IFNULL(ROUND(SUM(poi.subtotal), 2), 0.00) AS total_purchase_amount
 FROM supplier s
-LEFT JOIN purchase_order po
+JOIN purchase_order po
     ON s.supplier_id = po.supplier_id
-LEFT JOIN purchase_order_item poi
+JOIN purchase_order_item poi
     ON po.purchase_order_id = poi.purchase_order_id
 GROUP BY s.supplier_id, s.supplier_name
 ORDER BY supply_frequency DESC, avg_unit_price ASC, s.supplier_name ASC;
