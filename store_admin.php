@@ -1,7 +1,7 @@
 <?php
 $host = 'localhost';
 $user = 'root';
-$pwd = 'csc3170';
+$pwd = '081012';
 $dbname = 'csc3170_store';
 
 $error = '';
@@ -383,24 +383,25 @@ if (!$conn) {
     }
 
     .table-shell {
-        overflow: auto;
-        border-radius: 20px;
-        border: 1px solid rgba(214, 181, 113, 0.14);
-        background: rgba(9, 11, 17, 0.78);
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 1px;
     }
 
     .table {
         margin: 0;
-        color: var(--text);
+        color: #f4efe6;
         min-width: 100%;
+        background-color: transparent;
     }
 
     .table thead th {
         position: sticky;
         top: 0;
         z-index: 1;
-        border-bottom: 1px solid rgba(214, 181, 113, 0.18);
-        background: rgba(24, 28, 38, 0.96);
+        border-bottom: 1px solid rgba(214, 181, 113, 0.3);
+        background: #0a0c14;
         color: var(--gold);
         font-weight: 700;
         letter-spacing: 0.06em;
@@ -412,21 +413,28 @@ if (!$conn) {
 
     .table tbody tr {
         transition: background 0.16s ease;
+        background-color: transparent;
     }
 
     .table tbody tr:nth-child(odd) {
-        background: rgba(255, 255, 255, 0.015);
+        background-color: rgba(255, 255, 255, 0.03);
+    }
+
+    .table tbody tr:nth-child(even) {
+        background-color: transparent;
     }
 
     .table tbody tr:hover {
-        background: rgba(214, 181, 113, 0.08);
+        background: rgba(214, 181, 113, 0.1);
     }
 
     .table tbody td {
         padding: 15px 18px;
-        border-color: rgba(255, 255, 255, 0.05);
+        border-color: rgba(214, 181, 113, 0.12);
         vertical-align: top;
         white-space: nowrap;
+        color: #f4efe6;
+        background-color: transparent;
     }
 
     @media (max-width: 1024px) {
@@ -558,7 +566,6 @@ if (!$conn) {
                     <h3>采购模块</h3>
                     <div class="button-grid">
                         <button class="query-btn" type="button" onclick="setSql('SELECT * FROM purchase_order ORDER BY receive_time DESC LIMIT 20')">最近采购单</button>
-                        <button class="query-btn" type="button" onclick="setSql('SELECT s.supplier_name,COUNT(*) freq,SUM(poi.subtotal) total FROM supplier s LEFT JOIN purchase_order po ON s.supplier_id=po.supplier_id LEFT JOIN purchase_order_item poi ON po.purchase_order_id=poi.purchase_order_id GROUP BY s.supplier_id')">供应商供货统计</button>
                     </div>
                 </section>
             </div>
