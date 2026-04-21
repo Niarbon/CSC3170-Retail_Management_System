@@ -96,19 +96,21 @@ SET quantity = quantity + @purchase_quantity,
     last_updated = CURRENT_TIMESTAMP
 WHERE product_id = @product_id;
 
-INSERT INTO supplier_supply_record (
-    supplier_id,
+INSERT INTO inventory_log (
     product_id,
     purchase_item_id,
-    unit_price,
-    quantity,
-    received_at
+    transaction_item_id,
+    change_quantity,
+    balance_after,
+    change_reason,
+    created_at
 ) VALUES (
-    @supplier_id,
     @product_id,
     @purchase_item_id,
-    @purchase_unit_price,
-    @purchase_quantity,
+    NULL,
+    @quantity,
+    (SELECT quantity FROM inventory WHERE product_id = @product_id), -- 获取更新后的当前库存
+    'PURCHASE_RECEIPT', -- 变动原因：采购入库
     CURRENT_TIMESTAMP
 );
 
