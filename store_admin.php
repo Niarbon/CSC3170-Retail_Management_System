@@ -1,13 +1,154 @@
 <?php
+function selectAllAssoc(mysqli $conn, string $sql): array
+{
+    $result = mysqli_query($conn, $sql);
+    if (!$result) {
+        throw new RuntimeException(mysqli_error($conn));
+    }
+
+    $rows = mysqli_fetch_all($result, MYSQLI_ASSOC);
+    mysqli_free_result($result);
+
+    return $rows;
+}
+
+function getTableColumns(mysqli $conn, string $dbname, string $table): array
+{
+    $safeDb = mysqli_real_escape_string($conn, $dbname);
+    $safeTable = mysqli_real_escape_string($conn, $table);
+    $sql = "SELECT COLUMN_NAME, COLUMN_TYPE
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = '{$safeDb}' AND TABLE_NAME = '{$safeTable}'
+            ORDER BY ORDINAL_POSITION";
+
+    return selectAllAssoc($conn, $sql);
+}
+
+function buildDatabaseContext(mysqli $conn, string $dbname, array $tables): string
+{
+    $blocks = [];
+
+    foreach ($tables as $table) {
+        $columns = getTableColumns($conn, $dbname, $table);
+        $data = selectAllAssoc($conn, "SELECT * FROM `{$table}`");
+
+        $columnText = [];
+        foreach ($columns as $column) {
+            $columnText[] = $column['COLUMN_NAME'] . ' (' . $column['COLUMN_TYPE'] . ')';
+        }
+
+        $blocks[] = "表名: {$table}\n"
+            . "字段: " . implode(', ', $columnText) . "\n"
+            . "数据(JSON):\n"
+            . json_encode(
+                $data,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+            );
+    }
+
+    return implode("\n\n====================\n\n", $blocks);
+}
+
+function callMiniMax(string $apiKey, string $apiUrl, string $model, string $systemPrompt, string $context, string $question): array
+{
+    $payload = [
+        'model' => $model,
+        'messages' => [
+            [
+                'role' => 'system',
+                'name' => 'Retail DB Assistant',
+                'content' => $systemPrompt,
+            ],
+            [
+                'role' => 'user',
+                'name' => '数据库上下文',
+                'content' => $context,
+            ],
+            [
+                'role' => 'user',
+                'name' => '用户问题',
+                'content' => $question,
+            ],
+        ],
+        'temperature' => 0.2,
+        'top_p' => 0.95,
+        'max_completion_tokens' => 2048,
+    ];
+
+    $ch = curl_init($apiUrl);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Content-Type: application/json',
+        ],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        CURLOPT_TIMEOUT => 120,
+    ]);
+
+    $response = curl_exec($ch);
+    if ($response === false) {
+        $error = curl_error($ch);
+        curl_close($ch);
+        throw new RuntimeException('调用 MiniMax 失败：' . $error);
+    }
+
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    $decoded = json_decode($response, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('MiniMax 返回了无法解析的响应。');
+    }
+
+    if ($httpCode >= 400) {
+        $message = $decoded['base_resp']['status_msg'] ?? ('HTTP ' . $httpCode);
+        throw new RuntimeException('MiniMax 接口返回错误：' . $message);
+    }
+
+    $answer = $decoded['choices'][0]['message']['content'] ?? '';
+    if ($answer === '') {
+        $message = $decoded['base_resp']['status_msg'] ?? '模型没有返回可展示的内容。';
+        throw new RuntimeException($message);
+    }
+
+    return [
+        'answer' => $answer,
+        'usage' => $decoded['usage'] ?? [],
+        'model' => $decoded['model'] ?? $model,
+    ];
+}
+
 $host = 'localhost';
 $user = 'root';
 $pwd = '081012';
 $dbname = 'csc3170_store';
+$minimaxApiUrl = 'https://api.minimaxi.com/v1/text/chatcompletion_v2';
+$minimaxApiKey = 'sk-cp-xw_X66v36p-ciVQviJaNdQz22HQtpOKcsqpZPY76Mrpy_qFzmBOkwgod9R6D6hIygypTpifZCz1z-oH2fjuP87zsoMIh45DCOlr3Wz3X4B60XxjwBVWG3wg';
+$minimaxModel = 'MiniMax-M2.7';
+$llmTables = [
+    'employee',
+    'member',
+    'category',
+    'supplier',
+    'product',
+    'inventory',
+    'sales_transaction',
+    'transaction_item',
+    'purchase_order',
+    'purchase_order_item',
+];
 
 $error = '';
 $cols = [];
 $rows = [];
 $sql = $_POST['sql'] ?? '';
+$formAction = $_POST['form_action'] ?? '';
+$llmQuestion = trim($_POST['llm_question'] ?? '');
+$llmAnswer = '';
+$llmError = '';
+$llmMeta = [];
 
 $conn = mysqli_connect($host, $user, $pwd, $dbname);
 if (!$conn) {
@@ -15,7 +156,38 @@ if (!$conn) {
 } else {
     mysqli_set_charset($conn, 'utf8mb4');
 
-    if ($sql) {
+    if ($formAction === 'llm_query') {
+        if ($llmQuestion === '') {
+            $llmError = '请输入问题后再发起 LLM 查询。';
+        } else {
+            try {
+                $context = buildDatabaseContext($conn, $dbname, $llmTables);
+                $systemPrompt = "你是一个零售管理数据库问答助手。\n"
+                    . "你只能依据用户提供的数据库上下文回答问题，不能编造不存在的数据。\n"
+                    . "如果上下文不足以支持回答，请明确说明信息不足。\n"
+                    . "请使用简洁、清晰的中文回答，并尽量引用表名或字段名说明依据。\n"
+                    . "这是课程演示项目，不需要生成 SQL，也不要建议执行写操作。";
+
+                $llmResult = callMiniMax(
+                    $minimaxApiKey,
+                    $minimaxApiUrl,
+                    $minimaxModel,
+                    $systemPrompt,
+                    "以下是当前数据库的完整演示上下文：\n\n" . $context,
+                    $llmQuestion
+                );
+
+                $llmAnswer = $llmResult['answer'];
+                $llmMeta = [
+                    'model' => $llmResult['model'],
+                    'tables' => count($llmTables),
+                    'tokens' => $llmResult['usage']['total_tokens'] ?? null,
+                ];
+            } catch (Throwable $e) {
+                $llmError = $e->getMessage();
+            }
+        }
+    } elseif ($sql) {
         $result = mysqli_query($conn, $sql);
         if (mysqli_errno($conn)) {
             $error = mysqli_error($conn);
@@ -25,6 +197,7 @@ if (!$conn) {
                     $cols[] = $c->name;
                 }
                 $rows = mysqli_fetch_all($result, MYSQLI_ASSOC);
+                mysqli_free_result($result);
             }
         }
     }
@@ -197,6 +370,13 @@ if (!$conn) {
         margin-bottom: 24px;
     }
 
+    .llm-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 24px;
+        margin-bottom: 24px;
+    }
+
     .panel,
     .result-panel,
     .message-panel {
@@ -304,6 +484,20 @@ if (!$conn) {
     .helper-text {
         color: var(--muted);
         font-size: 0.92rem;
+    }
+
+    .llm-answer {
+        margin-top: 12px;
+        color: #f6eee1;
+        line-height: 1.85;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .llm-meta {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 0.9rem;
     }
 
     .shortcut-groups {
@@ -517,6 +711,7 @@ if (!$conn) {
             </div>
 
             <form method="post" class="editor-form">
+                <input type="hidden" name="form_action" value="sql_execute">
                 <textarea name="sql" class="form-control" rows="6" placeholder="输入你的 SQL 语句"><?=htmlspecialchars($sql, ENT_QUOTES, 'UTF-8')?></textarea>
                 <div class="action-row">
                     <button class="btn-run" type="submit">执行 SQL</button>
@@ -570,6 +765,48 @@ if (!$conn) {
                 </section>
             </div>
         </section>
+    </div>
+
+    <div class="llm-grid">
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">LLM Query</p>
+                    <h2>自然语言查询数据库</h2>
+                </div>
+                <span class="status-badge <?=($llmError || $error) ? 'status-error' : 'status-ready'?>"><?=($llmError || $error) ? '需要处理' : '演示就绪'?></span>
+            </div>
+
+            <form method="post" class="editor-form">
+                <input type="hidden" name="form_action" value="llm_query">
+                <textarea name="llm_question" class="form-control" rows="5" placeholder="例如：现在有哪些在职员工？库存最低的商品有哪些？最近的采购单和销售单情况如何？"><?=htmlspecialchars($llmQuestion, ENT_QUOTES, 'UTF-8')?></textarea>
+                <div class="action-row">
+                    <button class="btn-run" type="submit">LLM 查询</button>
+                    <span class="helper-text">点击按钮时会把当前数据库主要表数据注入模型上下文，本次回答基于点击时的数据库快照。</span>
+                </div>
+            </form>
+        </section>
+
+        <?php if ($llmError): ?>
+            <section class="message-panel error">
+                <p class="panel-kicker">LLM Feedback</p>
+                <h2 class="message-title">LLM 查询失败</h2>
+                <p class="message-body"><?=htmlspecialchars($llmError, ENT_QUOTES, 'UTF-8')?></p>
+            </section>
+        <?php elseif ($llmAnswer): ?>
+            <section class="message-panel success">
+                <p class="panel-kicker">LLM Answer</p>
+                <h2 class="message-title">问答结果</h2>
+                <div class="llm-answer"><?=htmlspecialchars($llmAnswer, ENT_QUOTES, 'UTF-8')?></div>
+                <div class="llm-meta">
+                    当前回答基于 <?=$llmMeta['tables'] ?? count($llmTables)?> 张表的注入结果，
+                    模型：<?=htmlspecialchars((string)($llmMeta['model'] ?? $minimaxModel), ENT_QUOTES, 'UTF-8')?>
+                    <?php if (!empty($llmMeta['tokens'])): ?>
+                        ，总 Tokens：<?=htmlspecialchars((string)$llmMeta['tokens'], ENT_QUOTES, 'UTF-8')?>
+                    <?php endif ?>
+                </div>
+            </section>
+        <?php endif ?>
     </div>
 
     <?php if ($error): ?>
