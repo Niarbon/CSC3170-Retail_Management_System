@@ -53,13 +53,13 @@ CREATE TABLE member (
     member_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     member_name VARCHAR(100) NOT NULL,
     phone_number VARCHAR(20) NOT NULL,
-    points INT NOT NULL DEFAULT 0,
-    join_date DATE NOT NULL DEFAULT '0000-00-00',
+    points DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    join_date DATE NULL, 
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT uq_member_phone UNIQUE (phone_number)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE product (
     product_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -135,7 +135,7 @@ CREATE TABLE transaction_item (
     subtotal DECIMAL(10,2) NOT NULL,
     CONSTRAINT uq_transaction_product UNIQUE (transaction_id, product_id),
     CONSTRAINT chk_transaction_item_unit_price_nonnegative CHECK (unit_price >= 0),
-    CONSTRAINT chk_transaction_item_quantity_positive CHECK (quantity > 0),
+    CONSTRAINT chk_transaction_item_quantity_positive CHECK (quantity >= 0),
     CONSTRAINT chk_transaction_item_subtotal_nonnegative CHECK (subtotal >= 0),
     CONSTRAINT fk_transaction_item_transaction
         FOREIGN KEY (transaction_id) REFERENCES sales_transaction(transaction_id)
@@ -187,30 +187,47 @@ CREATE TABLE purchase_order_item (
         ON UPDATE CASCADE
 ) ENGINE=InnoDB;
 
--- Helpful optional history table for supplier performance and auditing.
-CREATE TABLE supplier_supply_record (
-    supply_record_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    supplier_id INT UNSIGNED NOT NULL,
-    product_id INT UNSIGNED NOT NULL,
-    purchase_item_id INT UNSIGNED NOT NULL,
-    unit_price DECIMAL(10,2) NOT NULL,
-    quantity INT NOT NULL,
-    received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_supply_record_unit_price_nonnegative CHECK (unit_price >= 0),
-    CONSTRAINT chk_supply_record_quantity_positive CHECK (quantity > 0),
-    CONSTRAINT fk_supply_record_supplier
-        FOREIGN KEY (supplier_id) REFERENCES supplier(supplier_id)
+CREATE TABLE points_log (
+    points_log_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    member_id INT UNSIGNED NOT NULL, 
+    transaction_id INT UNSIGNED NULL, 
+	points_delta INT NOT NULL,       
+	balance_after INT NOT NULL, 
+    change_reason VARCHAR(255) NULL, -- 例如 '消费赠送', '积分抵现'
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+    CONSTRAINT fk_points_log_member
+        FOREIGN KEY (member_id) REFERENCES member(member_id)
         ON DELETE CASCADE
         ON UPDATE CASCADE,
-    CONSTRAINT fk_supply_record_product
+    CONSTRAINT fk_points_log_transaction
+        FOREIGN KEY (transaction_id) REFERENCES sales_transaction(transaction_id)
+        ON DELETE SET NULL
+        ON UPDATE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE inventory_log (
+    inventory_log_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    product_id INT UNSIGNED NOT NULL, 
+    purchase_item_id INT UNSIGNED NULL, 
+    transaction_item_id INT UNSIGNED NULL, 
+    change_quantity INT NOT NULL,    -- 正数代表入库，负数代表出库
+    balance_after INT NOT NULL, 
+    change_reason VARCHAR(50) NULL,  -- 例如 'PURCHASE', 'SALE', 'RETURN'
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+    CONSTRAINT fk_inventory_log_product
         FOREIGN KEY (product_id) REFERENCES product(product_id)
         ON DELETE RESTRICT
         ON UPDATE CASCADE,
-    CONSTRAINT fk_supply_record_purchase_item
+    CONSTRAINT fk_inventory_log_purchase
         FOREIGN KEY (purchase_item_id) REFERENCES purchase_order_item(purchase_item_id)
-        ON DELETE CASCADE
+        ON DELETE SET NULL
+        ON UPDATE CASCADE,
+    CONSTRAINT fk_inventory_log_transaction
+        FOREIGN KEY (transaction_item_id) REFERENCES transaction_item(transaction_item_id)
+        ON DELETE SET NULL
         ON UPDATE CASCADE
 ) ENGINE=InnoDB;
+
 
 -- Indexes for frequent JOIN / WHERE columns.
 CREATE INDEX idx_supplier_phone_number ON supplier(phone_number);
@@ -228,4 +245,8 @@ CREATE INDEX idx_purchase_order_supplier_id ON purchase_order(supplier_id);
 CREATE INDEX idx_purchase_order_employee_id ON purchase_order(employee_id);
 CREATE INDEX idx_purchase_order_receive_time ON purchase_order(receive_time);
 CREATE INDEX idx_purchase_order_item_product_id ON purchase_order_item(product_id);
-CREATE INDEX idx_supply_record_supplier_product ON supplier_supply_record(supplier_id, product_id);
+CREATE INDEX idx_points_log_member_id ON points_log(member_id);
+CREATE INDEX idx_points_log_created_at ON points_log(created_at);
+CREATE INDEX idx_inventory_log_product_id ON inventory_log(product_id);
+CREATE INDEX idx_inventory_log_created_at ON inventory_log(created_at);
+CREATE INDEX idx_inventory_log_reason ON inventory_log(change_reason);
