@@ -150,12 +150,88 @@ function getInventoryStats(mysqli $conn): array
 
 function getAllProducts(mysqli $conn): array
 {
-    $sql = "SELECT p.product_id, p.product_name, i.quantity, i.min_stock, p.sell_price
+    $sql = "SELECT p.product_id, p.product_name, i.quantity, i.min_stock, p.sell_price, p.cost_price
             FROM product p
             JOIN inventory i ON p.product_id = i.product_id
             WHERE p.is_active = 1
             ORDER BY p.product_name";
     return selectAllAssoc($conn, $sql);
+}
+
+function getActiveEmployees(mysqli $conn): array
+{
+    $sql = "SELECT employee_id, employee_name FROM employee WHERE is_active = 1 ORDER BY employee_name";
+    return selectAllAssoc($conn, $sql);
+}
+
+function getActiveMembers(mysqli $conn): array
+{
+    $sql = "SELECT member_id, member_name, points, phone_number FROM member WHERE is_active = 1 ORDER BY member_name";
+    return selectAllAssoc($conn, $sql);
+}
+
+function getActiveSuppliers(mysqli $conn): array
+{
+    $sql = "SELECT supplier_id, supplier_name FROM supplier WHERE is_active = 1 ORDER BY supplier_name";
+    return selectAllAssoc($conn, $sql);
+}
+
+function getRecentSalesTransactions(mysqli $conn): array
+{
+    $sql = "SELECT st.transaction_id, 
+                    e.employee_name,
+                    m.member_name,
+                    st.transaction_time,
+                    st.total_price,
+                    st.discount,
+                    st.payment_method,
+                    (SELECT COUNT(*) FROM transaction_item WHERE transaction_id = st.transaction_id) as item_count
+            FROM sales_transaction st
+            LEFT JOIN employee e ON st.employee_id = e.employee_id
+            LEFT JOIN member m ON st.member_id = m.member_id
+            ORDER BY st.transaction_time DESC
+            LIMIT 30";
+    return selectAllAssoc($conn, $sql);
+}
+
+function getRecentPurchaseOrders(mysqli $conn): array
+{
+    $sql = "SELECT po.purchase_order_id, 
+                    s.supplier_name,
+                    e.employee_name,
+                    po.receive_time,
+                    po.total_price,
+                    (SELECT COUNT(*) FROM purchase_order_item WHERE purchase_order_id = po.purchase_order_id) as item_count
+            FROM purchase_order po
+            LEFT JOIN supplier s ON po.supplier_id = s.supplier_id
+            LEFT JOIN employee e ON po.employee_id = e.employee_id
+            ORDER BY po.receive_time DESC
+            LIMIT 30";
+    return selectAllAssoc($conn, $sql);
+}
+
+function getTransactionItems(mysqli $conn, int $transactionId): array
+{
+    $sql = "SELECT ti.transaction_item_id, ti.product_id, p.product_name, ti.quantity, ti.unit_price, ti.subtotal
+            FROM transaction_item ti
+            JOIN product p ON ti.product_id = p.product_id
+            WHERE ti.transaction_id = $transactionId";
+    return selectAllAssoc($conn, $sql);
+}
+
+function createNewMember(mysqli $conn, string $name, string $phone): ?int
+{
+    $name = mysqli_real_escape_string($conn, $name);
+    $phone = mysqli_real_escape_string($conn, $phone);
+    $joinDate = date('Y-m-d');
+    
+    $sql = "INSERT INTO member (member_name, phone_number, points, join_date, is_active) 
+            VALUES ('$name', '$phone', 0, '$joinDate', 1)";
+    
+    if (mysqli_query($conn, $sql)) {
+        return mysqli_insert_id($conn);
+    }
+    return null;
 }
 
 $host = 'localhost';
@@ -188,6 +264,9 @@ $llmQuestion = trim($_POST['llm_question'] ?? '');
 $llmAnswer = '';
 $llmError = '';
 $llmMeta = [];
+$scrollTo = '';
+$showTransactionResult = false;
+$lastCreatedTransaction = null;
 
 // Handle stock adjustment
 $stockAction = $_POST['stock_action'] ?? '';
@@ -195,11 +274,34 @@ $stockProductId = $_POST['stock_product_id'] ?? '';
 $stockQuantity = $_POST['stock_quantity'] ?? '';
 $stockOperation = $_POST['stock_operation'] ?? '';
 
-// Handle order actions
+// Handle sales order actions
 $orderAction = $_POST['order_action'] ?? '';
-$orderProductId = $_POST['order_product_id'] ?? '';
-$orderQuantity = $_POST['order_quantity'] ?? '';
-$orderSupplierId = $_POST['order_supplier_id'] ?? '';
+$orderProductIds = $_POST['order_product_ids'] ?? [];
+$orderQuantities = $_POST['order_quantities'] ?? [];
+$employeeId = $_POST['employee_id'] ?? '';
+$memberId = $_POST['member_id'] ?? '';
+$paymentMethod = $_POST['payment_method'] ?? '';
+$discount = $_POST['discount'] ?? 0;
+
+// Handle new member creation
+$newMemberAction = $_POST['new_member_action'] ?? '';
+$newMemberName = $_POST['new_member_name'] ?? '';
+$newMemberPhone = $_POST['new_member_phone'] ?? '';
+
+// Handle purchase order actions
+$purchaseAction = $_POST['purchase_action'] ?? '';
+$purchaseProductIds = $_POST['purchase_product_ids'] ?? [];
+$purchaseQuantities = $_POST['purchase_quantities'] ?? [];
+$purchaseSupplierId = $_POST['purchase_supplier_id'] ?? '';
+
+// Handle delete item from sales transaction
+$deleteItemAction = $_POST['delete_item_action'] ?? '';
+$deleteTransactionId = $_POST['delete_transaction_id'] ?? '';
+$deleteItemId = $_POST['delete_item_id'] ?? '';
+
+// Handle delete entire transaction
+$deleteTransactionAction = $_POST['delete_transaction_action'] ?? '';
+$deleteFullTransactionId = $_POST['delete_full_transaction_id'] ?? '';
 
 $conn = mysqli_connect($host, $user, $pwd, $dbname);
 if (!$conn) {
@@ -207,8 +309,22 @@ if (!$conn) {
 } else {
     mysqli_set_charset($conn, 'utf8mb4');
 
+    // Handle new member creation from sales form
+    if ($newMemberAction === 'create_member' && !empty($newMemberName) && !empty($newMemberPhone)) {
+        $newId = createNewMember($conn, $newMemberName, $newMemberPhone);
+        if ($newId) {
+            $success = "New member created successfully! Member ID: $newId - Name: " . htmlspecialchars($newMemberName);
+            // Set this as the selected member for the order
+            $memberId = $newId;
+            $scrollTo = 'sales_order_form';
+        } else {
+            $error = "Failed to create member. Phone number may already exist.";
+        }
+    }
+
     // Handle stock adjustment
     if ($stockAction === 'adjust_stock' && $stockProductId && $stockQuantity !== '') {
+        $scrollTo = 'result';
         $stockQuantity = intval($stockQuantity);
         $productId = intval($stockProductId);
         
@@ -216,7 +332,6 @@ if (!$conn) {
             $sql_update = "UPDATE inventory SET quantity = quantity + $stockQuantity, last_updated = CURRENT_TIMESTAMP WHERE product_id = $productId";
             if (mysqli_query($conn, $sql_update)) {
                 $success = "Added $stockQuantity units to product (ID: $productId)";
-                // Log inventory change
                 $log_sql = "INSERT INTO inventory_log (product_id, change_quantity, balance_after, change_reason, created_at) 
                             SELECT $productId, $stockQuantity, quantity, 'MANUAL_ADD', CURRENT_TIMESTAMP FROM inventory WHERE product_id = $productId";
                 mysqli_query($conn, $log_sql);
@@ -224,7 +339,6 @@ if (!$conn) {
                 $error = mysqli_error($conn);
             }
         } elseif ($stockOperation === 'remove') {
-            // Check if enough stock
             $check_sql = "SELECT quantity FROM inventory WHERE product_id = $productId";
             $check_result = mysqli_query($conn, $check_sql);
             $current = mysqli_fetch_assoc($check_result);
@@ -244,70 +358,267 @@ if (!$conn) {
         }
     }
 
-    // Handle purchase order creation
-    if ($orderAction === 'create_order' && $orderProductId && $orderQuantity && $orderSupplierId) {
-        $orderQuantity = intval($orderQuantity);
-        $productId = intval($orderProductId);
-        $supplierId = intval($orderSupplierId);
+    // Handle multi-item purchase order creation
+    if ($purchaseAction === 'create_purchase' && !empty($purchaseProductIds) && $purchaseSupplierId) {
+        $scrollTo = 'result';
+        $supplierId = intval($purchaseSupplierId);
         
-        // Get product cost price
-        $price_sql = "SELECT cost_price FROM product WHERE product_id = $productId";
-        $price_result = mysqli_query($conn, $price_sql);
-        $product_data = mysqli_fetch_assoc($price_result);
-        $unitPrice = $product_data['cost_price'] ?? 0;
-        $subtotal = round($orderQuantity * $unitPrice, 2);
+        $items = [];
+        foreach ($purchaseProductIds as $index => $productId) {
+            if (!empty($productId) && !empty($purchaseQuantities[$index]) && intval($purchaseQuantities[$index]) > 0) {
+                $items[] = [
+                    'product_id' => intval($productId),
+                    'quantity' => intval($purchaseQuantities[$index])
+                ];
+            }
+        }
         
-        mysqli_begin_transaction($conn);
-        try {
-            // Insert purchase order
-            $po_sql = "INSERT INTO purchase_order (supplier_id, employee_id, total_price, receive_time) 
-                       VALUES ($supplierId, 1, $subtotal, CURRENT_TIMESTAMP)";
-            mysqli_query($conn, $po_sql);
-            $poId = mysqli_insert_id($conn);
-            
-            // Insert purchase order item
-            $poi_sql = "INSERT INTO purchase_order_item (purchase_order_id, product_id, unit_price, quantity, subtotal) 
-                        VALUES ($poId, $productId, $unitPrice, $orderQuantity, $subtotal)";
-            mysqli_query($conn, $poi_sql);
-            $poiId = mysqli_insert_id($conn);
-            
-            // Update inventory
-            $inv_sql = "UPDATE inventory SET quantity = quantity + $orderQuantity, last_updated = CURRENT_TIMESTAMP 
-                        WHERE product_id = $productId";
-            mysqli_query($conn, $inv_sql);
-            
-            // Log inventory change
-            $log_sql = "INSERT INTO inventory_log (product_id, purchase_item_id, change_quantity, balance_after, change_reason, created_at) 
-                        SELECT $productId, $poiId, $orderQuantity, quantity, 'PURCHASE', CURRENT_TIMESTAMP 
-                        FROM inventory WHERE product_id = $productId";
-            mysqli_query($conn, $log_sql);
-            
-            mysqli_commit($conn);
-            $success = "Purchase order created successfully for product (ID: $productId) - Quantity: $orderQuantity";
-        } catch (Exception $e) {
-            mysqli_rollback($conn);
-            $error = "Order creation failed: " . $e->getMessage();
+        if (empty($items)) {
+            $error = "Please select at least one product with valid quantity.";
+        } else {
+            mysqli_begin_transaction($conn);
+            try {
+                $totalPrice = 0;
+                
+                foreach ($items as &$item) {
+                    $price_sql = "SELECT cost_price FROM product WHERE product_id = {$item['product_id']}";
+                    $price_result = mysqli_query($conn, $price_sql);
+                    $product_data = mysqli_fetch_assoc($price_result);
+                    $item['unit_price'] = $product_data['cost_price'];
+                    $item['subtotal'] = round($item['quantity'] * $item['unit_price'], 2);
+                    $totalPrice += $item['subtotal'];
+                }
+                
+                $po_sql = "INSERT INTO purchase_order (supplier_id, employee_id, total_price, receive_time) 
+                           VALUES ($supplierId, 1, $totalPrice, CURRENT_TIMESTAMP)";
+                mysqli_query($conn, $po_sql);
+                $poId = mysqli_insert_id($conn);
+                
+                foreach ($items as $item) {
+                    $poi_sql = "INSERT INTO purchase_order_item (purchase_order_id, product_id, unit_price, quantity, subtotal) 
+                                VALUES ($poId, {$item['product_id']}, {$item['unit_price']}, {$item['quantity']}, {$item['subtotal']})";
+                    mysqli_query($conn, $poi_sql);
+                    $poiId = mysqli_insert_id($conn);
+                    
+                    $inv_sql = "UPDATE inventory SET quantity = quantity + {$item['quantity']}, last_updated = CURRENT_TIMESTAMP 
+                                WHERE product_id = {$item['product_id']}";
+                    mysqli_query($conn, $inv_sql);
+                    
+                    $log_sql = "INSERT INTO inventory_log (product_id, purchase_item_id, change_quantity, balance_after, change_reason, created_at) 
+                                SELECT {$item['product_id']}, $poiId, {$item['quantity']}, quantity, 'PURCHASE', CURRENT_TIMESTAMP 
+                                FROM inventory WHERE product_id = {$item['product_id']}";
+                    mysqli_query($conn, $log_sql);
+                }
+                
+                mysqli_commit($conn);
+                $success = "Purchase order created successfully! Order ID: $poId - " . count($items) . " item(s). Total: $$totalPrice";
+            } catch (Exception $e) {
+                mysqli_rollback($conn);
+                $error = "Purchase order creation failed: " . $e->getMessage();
+            }
         }
     }
 
-    // Handle order deletion
-    if ($orderAction === 'delete_order' && $_POST['order_id'] ?? '') {
-        $orderId = intval($_POST['order_id']);
-        $check_sql = "SELECT purchase_order_id FROM purchase_order WHERE purchase_order_id = $orderId";
-        $check = mysqli_query($conn, $check_sql);
-        if (mysqli_num_rows($check) > 0) {
-            $del_sql = "DELETE FROM purchase_order WHERE purchase_order_id = $orderId";
-            if (mysqli_query($conn, $del_sql)) {
-                $success = "Purchase order (ID: $orderId) deleted successfully";
-            } else {
-                $error = mysqli_error($conn);
+    // Handle delete item from sales transaction
+    if ($deleteItemAction === 'delete_item' && $deleteTransactionId && $deleteItemId) {
+        $scrollTo = 'result';
+        $transactionId = intval($deleteTransactionId);
+        $itemId = intval($deleteItemId);
+        
+        mysqli_begin_transaction($conn);
+        try {
+            $item_sql = "SELECT product_id, quantity, subtotal FROM transaction_item WHERE transaction_item_id = $itemId";
+            $item_result = mysqli_query($conn, $item_sql);
+            $item = mysqli_fetch_assoc($item_result);
+            
+            if ($item) {
+                $inv_sql = "UPDATE inventory SET quantity = quantity + {$item['quantity']} WHERE product_id = {$item['product_id']}";
+                mysqli_query($conn, $inv_sql);
+                
+                $del_sql = "DELETE FROM transaction_item WHERE transaction_item_id = $itemId";
+                mysqli_query($conn, $del_sql);
+                
+                $update_total = "UPDATE sales_transaction SET total_price = (SELECT IFNULL(SUM(subtotal), 0) FROM transaction_item WHERE transaction_id = $transactionId) WHERE transaction_id = $transactionId";
+                mysqli_query($conn, $update_total);
+                
+                $check_items = "SELECT COUNT(*) as cnt FROM transaction_item WHERE transaction_id = $transactionId";
+                $check_result = mysqli_query($conn, $check_items);
+                $item_count = mysqli_fetch_assoc($check_result);
+                
+                if ($item_count['cnt'] == 0) {
+                    $del_trans = "DELETE FROM sales_transaction WHERE transaction_id = $transactionId";
+                    mysqli_query($conn, $del_trans);
+                    $success = "Item removed and transaction deleted (no items remaining)";
+                } else {
+                    $success = "Item removed from transaction successfully. Inventory restored.";
+                }
+                
+                $log_sql = "INSERT INTO inventory_log (product_id, change_quantity, balance_after, change_reason, created_at) 
+                            SELECT {$item['product_id']}, {$item['quantity']}, quantity, 'SALE_ITEM_REMOVED', CURRENT_TIMESTAMP 
+                            FROM inventory WHERE product_id = {$item['product_id']}";
+                mysqli_query($conn, $log_sql);
             }
+            
+            mysqli_commit($conn);
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
+            $error = "Failed to delete item: " . $e->getMessage();
+        }
+    }
+
+    // Handle delete entire sales transaction
+    if ($deleteTransactionAction === 'delete_full_transaction' && $deleteFullTransactionId) {
+        $scrollTo = 'result';
+        $transactionId = intval($deleteFullTransactionId);
+        
+        mysqli_begin_transaction($conn);
+        try {
+            $items_sql = "SELECT product_id, quantity FROM transaction_item WHERE transaction_id = $transactionId";
+            $items_result = mysqli_query($conn, $items_sql);
+            while ($item = mysqli_fetch_assoc($items_result)) {
+                $inv_sql = "UPDATE inventory SET quantity = quantity + {$item['quantity']} WHERE product_id = {$item['product_id']}";
+                mysqli_query($conn, $inv_sql);
+                
+                $log_sql = "INSERT INTO inventory_log (product_id, change_quantity, balance_after, change_reason, created_at) 
+                            SELECT {$item['product_id']}, {$item['quantity']}, quantity, 'TRANSACTION_DELETED', CURRENT_TIMESTAMP 
+                            FROM inventory WHERE product_id = {$item['product_id']}";
+                mysqli_query($conn, $log_sql);
+            }
+            
+            $del_sql = "DELETE FROM sales_transaction WHERE transaction_id = $transactionId";
+            mysqli_query($conn, $del_sql);
+            
+            mysqli_commit($conn);
+            $success = "Sales transaction (ID: $transactionId) deleted successfully. Inventory restored.";
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
+            $error = "Failed to delete transaction: " . $e->getMessage();
+        }
+    }
+
+    // Handle multi-item sales order creation
+    if ($orderAction === 'create_sale' && !empty($orderProductIds) && $employeeId) {
+        $scrollTo = 'result';
+        $empId = intval($employeeId);
+        $memId = !empty($memberId) ? intval($memberId) : null;
+        $payMethod = mysqli_real_escape_string($conn, $paymentMethod);
+        $discountAmount = floatval($discount);
+        
+        $items = [];
+        foreach ($orderProductIds as $index => $productId) {
+            if (!empty($productId) && !empty($orderQuantities[$index]) && intval($orderQuantities[$index]) > 0) {
+                $items[] = [
+                    'product_id' => intval($productId),
+                    'quantity' => intval($orderQuantities[$index])
+                ];
+            }
+        }
+        
+        if (empty($items)) {
+            $error = "Please select at least one product with valid quantity.";
         } else {
-            $error = "Order ID not found";
+            mysqli_begin_transaction($conn);
+            try {
+                $totalPrice = 0;
+                
+                foreach ($items as &$item) {
+                    $price_sql = "SELECT sell_price FROM product WHERE product_id = {$item['product_id']}";
+                    $price_result = mysqli_query($conn, $price_sql);
+                    $product_data = mysqli_fetch_assoc($price_result);
+                    $item['unit_price'] = $product_data['sell_price'];
+                    $item['subtotal'] = round($item['quantity'] * $item['unit_price'], 2);
+                    $totalPrice += $item['subtotal'];
+                    
+                    $stock_sql = "SELECT quantity FROM inventory WHERE product_id = {$item['product_id']}";
+                    $stock_result = mysqli_query($conn, $stock_sql);
+                    $stock_data = mysqli_fetch_assoc($stock_result);
+                    if ($stock_data['quantity'] < $item['quantity']) {
+                        throw new Exception("Insufficient stock for product ID: {$item['product_id']}. Available: {$stock_data['quantity']}");
+                    }
+                }
+                
+                $finalPrice = max(0, $totalPrice - $discountAmount);
+                
+                $memberSql = $memId ? $memId : "NULL";
+                $trans_sql = "INSERT INTO sales_transaction (employee_id, member_id, transaction_time, total_price, discount, payment_method) 
+                              VALUES ($empId, $memberSql, CURRENT_TIMESTAMP, $finalPrice, $discountAmount, '$payMethod')";
+                mysqli_query($conn, $trans_sql);
+                $transId = mysqli_insert_id($conn);
+                
+                $itemsList = [];
+                foreach ($items as $item) {
+                    $ti_sql = "INSERT INTO transaction_item (transaction_id, product_id, unit_price, quantity, subtotal) 
+                               VALUES ($transId, {$item['product_id']}, {$item['unit_price']}, {$item['quantity']}, {$item['subtotal']})";
+                    mysqli_query($conn, $ti_sql);
+                    $tiId = mysqli_insert_id($conn);
+                    
+                    $inv_sql = "UPDATE inventory SET quantity = quantity - {$item['quantity']}, last_updated = CURRENT_TIMESTAMP 
+                                WHERE product_id = {$item['product_id']}";
+                    mysqli_query($conn, $inv_sql);
+                    
+                    $log_sql = "INSERT INTO inventory_log (product_id, transaction_item_id, change_quantity, balance_after, change_reason, created_at) 
+                                SELECT {$item['product_id']}, $tiId, -{$item['quantity']}, quantity, 'SALE', CURRENT_TIMESTAMP 
+                                FROM inventory WHERE product_id = {$item['product_id']}";
+                    mysqli_query($conn, $log_sql);
+                    
+                    $itemsList[] = $item;
+                }
+                
+                if ($memId) {
+                    $pointsEarned = floor($finalPrice);
+                    $points_sql = "UPDATE member SET points = points + $pointsEarned WHERE member_id = $memId";
+                    mysqli_query($conn, $points_sql);
+                    
+                    $points_log_sql = "INSERT INTO points_log (member_id, transaction_id, points_delta, balance_after, change_reason, created_at) 
+                                       SELECT $memId, $transId, $pointsEarned, points, 'EARN_FROM_PURCHASE', CURRENT_TIMESTAMP 
+                                       FROM member WHERE member_id = $memId";
+                    mysqli_query($conn, $points_log_sql);
+                }
+                
+                mysqli_commit($conn);
+                
+                $showTransactionResult = true;
+                $memberText = $memId ? "Member (ID: $memId)" : "Guest";
+                $success = "✅ Sales transaction created successfully! Transaction ID: $transId - " . count($items) . " item(s) sold to $memberText. Subtotal: $$totalPrice, Discount: $$discountAmount, Total: $$finalPrice";
+                
+                $transactionDetail = selectAllAssoc($conn, "
+                    SELECT st.transaction_id, e.employee_name, 
+                           IFNULL(m.member_name, 'Guest') as customer_name,
+                           st.transaction_time, st.total_price, st.discount, st.payment_method,
+                           (SELECT COUNT(*) FROM transaction_item WHERE transaction_id = st.transaction_id) as item_count
+                    FROM sales_transaction st
+                    LEFT JOIN employee e ON st.employee_id = e.employee_id
+                    LEFT JOIN member m ON st.member_id = m.member_id
+                    WHERE st.transaction_id = $transId
+                ");
+                
+                if (!empty($transactionDetail)) {
+                    $cols = ['transaction_id', 'employee_name', 'customer_name', 'transaction_time', 'total_price', 'discount', 'payment_method', 'item_count'];
+                    $rows = $transactionDetail;
+                    
+                    $itemsDetail = selectAllAssoc($conn, "
+                        SELECT p.product_name, ti.quantity, ti.unit_price, ti.subtotal
+                        FROM transaction_item ti
+                        JOIN product p ON ti.product_id = p.product_id
+                        WHERE ti.transaction_id = $transId
+                    ");
+                    
+                    if (!empty($itemsDetail)) {
+                        $rows[0]['items'] = json_encode($itemsDetail);
+                    }
+                }
+                
+                $lastCreatedTransaction = $transId;
+                
+            } catch (Exception $e) {
+                mysqli_rollback($conn);
+                $error = "Sale creation failed: " . $e->getMessage();
+            }
         }
     }
 
     if ($formAction === 'llm_query') {
+        $scrollTo = 'llm';
         if ($llmQuestion === '') {
             $llmError = 'Please enter a question before initiating LLM query.';
         } else {
@@ -338,7 +649,8 @@ if (!$conn) {
                 $llmError = $e->getMessage();
             }
         }
-    } elseif ($sql) {
+    } elseif ($sql && !$showTransactionResult) {
+        $scrollTo = 'result';
         $result = mysqli_query($conn, $sql);
         if (mysqli_errno($conn)) {
             $error = mysqli_error($conn);
@@ -355,15 +667,32 @@ if (!$conn) {
         }
     }
     
-    // Get data for charts and alerts
+    // Get data for charts and alerts (always refresh)
     $lowStockProducts = getLowStockProducts($conn);
     $inventoryStats = getInventoryStats($conn);
     $allProducts = getAllProducts($conn);
-    $suppliers = selectAllAssoc($conn, "SELECT supplier_id, supplier_name FROM supplier WHERE is_active = 1");
-    $recentOrders = selectAllAssoc($conn, "SELECT po.purchase_order_id, s.supplier_name, po.total_price, po.receive_time 
-                                            FROM purchase_order po 
-                                            JOIN supplier s ON po.supplier_id = s.supplier_id 
-                                            ORDER BY po.receive_time DESC LIMIT 10");
+    $employees = getActiveEmployees($conn);
+    $members = getActiveMembers($conn);
+    $suppliers = getActiveSuppliers($conn);
+    $recentTransactions = getRecentSalesTransactions($conn);
+    $recentPurchaseOrders = getRecentPurchaseOrders($conn);
+    
+    // Get items for selected transaction (for delete item dropdown)
+    $selectedTransactionForDelete = $_POST['selected_transaction_for_delete'] ?? '';
+    $transactionItems = [];
+    if ($selectedTransactionForDelete) {
+        $transactionItems = getTransactionItems($conn, intval($selectedTransactionForDelete));
+    }
+}
+
+// Generate scroll JavaScript
+$scrollScript = '';
+if ($scrollTo === 'result') {
+    $scrollScript = '<script>document.addEventListener("DOMContentLoaded", function() { document.getElementById("result-section").scrollIntoView({ behavior: "smooth", block: "start" }); });</script>';
+} elseif ($scrollTo === 'llm') {
+    $scrollScript = '<script>document.addEventListener("DOMContentLoaded", function() { document.getElementById("llm-section").scrollIntoView({ behavior: "smooth", block: "start" }); });</script>';
+} elseif ($scrollTo === 'sales_order_form') {
+    $scrollScript = '<script>document.addEventListener("DOMContentLoaded", function() { document.getElementById("sales-order-form").scrollIntoView({ behavior: "smooth", block: "start" }); });</script>';
 }
 ?>
 
@@ -390,6 +719,7 @@ if (!$conn) {
         --green: #7bc39b;
         --red: #ea8f85;
         --warning: #f0a34b;
+        --info: #6bb5d0;
         --shadow: 0 28px 60px rgba(0, 0, 0, 0.42);
         --radius-xl: 28px;
         --radius-lg: 20px;
@@ -692,6 +1022,29 @@ if (!$conn) {
         border-color: var(--gold);
     }
 
+    .btn-add-item {
+        border-radius: 999px;
+        padding: 8px 16px;
+        background: rgba(123, 195, 155, 0.2);
+        color: var(--green);
+        border: 1px solid var(--green);
+        margin-top: 10px;
+    }
+
+    .btn-new-member {
+        border-radius: 999px;
+        padding: 8px 16px;
+        background: rgba(107, 181, 208, 0.2);
+        color: var(--info);
+        border: 1px solid var(--info);
+        margin-left: 10px;
+        white-space: nowrap;
+    }
+
+    .btn-new-member:hover {
+        background: rgba(107, 181, 208, 0.35);
+    }
+
     .helper-text {
         color: var(--muted);
         font-size: 0.92rem;
@@ -881,6 +1234,116 @@ if (!$conn) {
         margin-top: 8px;
     }
 
+    .item-row {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 12px;
+        align-items: center;
+    }
+
+    .item-row select {
+        flex: 2;
+    }
+
+    .item-row input {
+        flex: 1;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+    }
+
+    .form-row > * {
+        flex: 1;
+        min-width: 120px;
+    }
+
+    .field-label {
+        font-size: 0.7rem;
+        color: var(--gold);
+        margin-bottom: 4px;
+        display: block;
+        letter-spacing: 0.05em;
+    }
+
+    .input-wrapper {
+        margin-bottom: 8px;
+    }
+
+    .member-select-wrapper {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+    }
+
+    .member-select-wrapper select {
+        flex: 2;
+    }
+
+    .member-select-wrapper button {
+        flex-shrink: 0;
+    }
+
+    .discount-preview {
+        font-size: 0.85rem;
+        color: var(--green);
+        margin-top: 8px;
+        padding: 8px 12px;
+        background: rgba(123, 195, 155, 0.1);
+        border-radius: 12px;
+        text-align: center;
+    }
+
+    .new-transaction-badge {
+        background: rgba(123, 195, 155, 0.2);
+        border: 1px solid var(--green);
+        border-radius: 20px;
+        padding: 2px 10px;
+        font-size: 0.7rem;
+        margin-left: 10px;
+        color: var(--green);
+    }
+
+    .modal-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(5px);
+        z-index: 1000;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .modal-content {
+        background: linear-gradient(180deg, rgba(23, 28, 40, 0.98), rgba(12, 15, 22, 0.98));
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-xl);
+        padding: 30px;
+        width: 90%;
+        max-width: 450px;
+        box-shadow: var(--shadow);
+    }
+
+    .modal-content h3 {
+        margin-top: 0;
+        color: var(--gold);
+        font-family: var(--serif);
+    }
+
+    .modal-buttons {
+        display: flex;
+        gap: 12px;
+        justify-content: flex-end;
+        margin-top: 20px;
+    }
+
     @media (max-width: 1024px) {
         .hero-panel,
         .layout-grid {
@@ -923,6 +1386,24 @@ if (!$conn) {
         .table thead th {
             white-space: normal;
         }
+        
+        .item-row {
+            flex-direction: column;
+        }
+        
+        .form-row {
+            flex-direction: column;
+        }
+        
+        .member-select-wrapper {
+            flex-direction: column;
+        }
+        
+        .member-select-wrapper button {
+            width: 100%;
+            margin-left: 0;
+            margin-top: 8px;
+        }
     }
 </style>
 </head>
@@ -932,7 +1413,7 @@ if (!$conn) {
         <div>
             <p class="eyebrow">CSC3170 Store</p>
             <h1 class="hero-title">Database Control Center</h1>
-            <p class="hero-text">A lightweight SQL workbench for course projects. Execute queries, manage inventory, create purchase orders, and analyze data with AI assistance.</p>
+            <p class="hero-text">A lightweight SQL workbench for course projects. Execute queries, manage inventory, create sales orders, and analyze data with AI assistance.</p>
         </div>
         <div class="hero-meta">
             <div class="meta-card">
@@ -1056,7 +1537,8 @@ if (!$conn) {
                     <p class="helper-label">Sales</p>
                     <h3>Sales Module</h3>
                     <div class="button-grid">
-                        <button class="query-btn" type="button" onclick="setSql('SELECT * FROM sales_transaction ORDER BY transaction_time DESC LIMIT 20')">Recent 20 Orders</button>
+                        <button class="query-btn" type="button" onclick="setSql('SELECT * FROM sales_transaction ORDER BY transaction_time DESC LIMIT 20')">Recent Sales Transactions</button>
+                        <button class="query-btn" type="button" onclick="setSql('SELECT * FROM member ORDER BY points DESC')">Member Points Ranking</button>
                     </div>
                 </section>
 
@@ -1081,28 +1563,36 @@ if (!$conn) {
                 </div>
             </div>
             <form method="post" class="editor-form">
-                <input type="hidden" name="form_action" value="">
                 <input type="hidden" name="stock_action" value="adjust_stock">
                 <div class="row g-3">
                     <div class="col-12">
-                        <select name="stock_product_id" class="form-control" required>
-                            <option value="">Select Product</option>
-                            <?php foreach ($allProducts as $product): ?>
-                            <option value="<?=$product['product_id']?>">
-                                <?=htmlspecialchars($product['product_name'], ENT_QUOTES, 'UTF-8')?> 
-                                (Stock: <?=$product['quantity']?>)
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
+                        <div class="input-wrapper">
+                            <span class="field-label">📦 SELECT PRODUCT</span>
+                            <select name="stock_product_id" class="form-control" required>
+                                <option value="">Select Product</option>
+                                <?php foreach ($allProducts as $product): ?>
+                                <option value="<?=$product['product_id']?>">
+                                    <?=htmlspecialchars($product['product_name'], ENT_QUOTES, 'UTF-8')?> 
+                                    (Stock: <?=$product['quantity']?> | Price: $<?=$product['sell_price']?>)
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                     </div>
                     <div class="col-6">
-                        <input type="number" name="stock_quantity" class="form-control" placeholder="Quantity" required min="1">
+                        <div class="input-wrapper">
+                            <span class="field-label">🔢 QUANTITY</span>
+                            <input type="number" name="stock_quantity" class="form-control" placeholder="Quantity" required min="1">
+                        </div>
                     </div>
                     <div class="col-6">
-                        <select name="stock_operation" class="form-control" required>
-                            <option value="add">Add Stock (+)</option>
-                            <option value="remove">Remove Stock (-)</option>
-                        </select>
+                        <div class="input-wrapper">
+                            <span class="field-label">⚙️ OPERATION</span>
+                            <select name="stock_operation" class="form-control" required>
+                                <option value="add">➕ Add Stock (+)</option>
+                                <option value="remove">➖ Remove Stock (-)</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="col-12">
                         <button class="btn-run" type="submit" style="width: 100%;">Apply Stock Change</button>
@@ -1111,79 +1601,403 @@ if (!$conn) {
             </form>
         </section>
 
-        <section class="panel">
+        <!-- Multi-Item Sales Order Creation (Customer Sales) -->
+        <section class="panel" id="sales-order-form">
             <div class="panel-header">
                 <div>
                     <p class="panel-kicker">Operations</p>
-                    <h2>Create Purchase Order</h2>
+                    <h2>🛒 Create Sales Order (Customer)</h2>
                 </div>
             </div>
-            <form method="post" class="editor-form">
-                <input type="hidden" name="form_action" value="">
-                <input type="hidden" name="order_action" value="create_order">
+            <form method="post" class="editor-form" id="orderForm" onchange="updateDiscountPreview()" onkeyup="updateDiscountPreview()">
+                <input type="hidden" name="order_action" value="create_sale">
                 <div class="row g-3">
-                    <div class="col-12">
-                        <select name="order_product_id" class="form-control" required>
-                            <option value="">Select Product</option>
-                            <?php foreach ($allProducts as $product): ?>
-                            <option value="<?=$product['product_id']?>">
-                                <?=htmlspecialchars($product['product_name'], ENT_QUOTES, 'UTF-8')?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-6">
-                        <input type="number" name="order_quantity" class="form-control" placeholder="Quantity" required min="1">
-                    </div>
-                    <div class="col-6">
-                        <select name="order_supplier_id" class="form-control" required>
-                            <option value="">Select Supplier</option>
-                            <?php foreach ($suppliers as $supplier): ?>
-                            <option value="<?=$supplier['supplier_id']?>">
-                                <?=htmlspecialchars($supplier['supplier_name'], ENT_QUOTES, 'UTF-8')?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-12">
-                        <button class="btn-run" type="submit" style="width: 100%;">Create Order & Restock</button>
-                    </div>
-                </div>
-            </form>
-        </section>
-
-        <section class="panel">
-            <div class="panel-header">
-                <div>
-                    <p class="panel-kicker">Operations</p>
-                    <h2>Delete Order</h2>
-                </div>
-            </div>
-            <form method="post" class="editor-form">
-                <input type="hidden" name="form_action" value="">
-                <input type="hidden" name="order_action" value="delete_order">
-                <div class="row g-3">
-                    <div class="col-12">
-                        <select name="order_id" class="form-control" required>
-                            <option value="">Select Order to Delete</option>
-                            <?php foreach ($recentOrders as $order): ?>
-                            <option value="<?=$order['purchase_order_id']?>">
-                                Order #<?=$order['purchase_order_id']?> - 
-                                <?=htmlspecialchars($order['supplier_name'], ENT_QUOTES, 'UTF-8')?> - 
-                                $<?=$order['total_price']?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
+                    <div class="form-row">
+                        <div class="input-wrapper" style="flex:1">
+                            <span class="field-label">👤 CASHIER</span>
+                            <select name="employee_id" class="form-control" required>
+                                <option value="">Select Cashier</option>
+                                <?php foreach ($employees as $emp): ?>
+                                <option value="<?=$emp['employee_id']?>">
+                                    <?=htmlspecialchars($emp['employee_name'], ENT_QUOTES, 'UTF-8')?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="input-wrapper" style="flex:2">
+                            <span class="field-label">💎 CUSTOMER</span>
+                            <div class="member-select-wrapper">
+                                <select name="member_id" class="form-control" id="memberSelect">
+                                    <option value="">👤 Guest (No Member)</option>
+                                    <?php foreach ($members as $mem): ?>
+                                    <option value="<?=$mem['member_id']?>" <?=($memberId == $mem['member_id']) ? 'selected' : ''?>>
+                                        ⭐ <?=htmlspecialchars($mem['member_name'], ENT_QUOTES, 'UTF-8')?> 
+                                        (Points: <?=$mem['points']?> | Tel: <?=htmlspecialchars($mem['phone_number'], ENT_QUOTES, 'UTF-8')?>)
+                                    </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn-new-member" onclick="openNewMemberModal()">➕ New Member</button>
+                            </div>
+                        </div>
+                        <div class="input-wrapper" style="flex:1">
+                            <span class="field-label">💳 PAYMENT METHOD</span>
+                            <select name="payment_method" class="form-control" required>
+                                <option value="">Select Method</option>
+                                <option value="CASH">💰 Cash</option>
+                                <option value="CARD">💳 Card</option>
+                                <option value="MOBILE_PAY">📱 Mobile Pay</option>
+                                <option value="BANK_TRANSFER">🏦 Bank Transfer</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="col-12">
-                        <button class="btn-secondary-custom" type="submit" style="width: 100%; background: rgba(234, 143, 133, 0.15); border-color: var(--red);">Delete Order</button>
+                        <div class="input-wrapper">
+                            <span class="field-label">🏷️ DISCOUNT (USD)</span>
+                            <input type="number" name="discount" id="discountInput" class="form-control" placeholder="Discount amount in USD" step="0.01" min="0" value="0" onchange="updateDiscountPreview()" onkeyup="updateDiscountPreview()">
+                        </div>
+                        <div class="discount-preview" id="discountPreview">
+                            Subtotal: $0.00 → After Discount: $0.00
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">🛒 ITEMS (Select product and quantity)</span>
+                            <div id="itemsContainer">
+                                <div class="item-row">
+                                    <select name="order_product_ids[]" class="form-control productSelect" required onchange="updateDiscountPreview()">
+                                        <option value="">Select Product</option>
+                                        <?php foreach ($allProducts as $product): ?>
+                                        <option value="<?=$product['product_id']?>" data-price="<?=$product['sell_price']?>" data-stock="<?=$product['quantity']?>">
+                                            <?=htmlspecialchars($product['product_name'], ENT_QUOTES, 'UTF-8')?> 
+                                            ($<?=$product['sell_price']?> | Stock: <?=$product['quantity']?>)
+                                        </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <input type="number" name="order_quantities[]" class="form-control quantityInput" placeholder="Quantity (min 1)" required min="1" onchange="updateDiscountPreview()" onkeyup="updateDiscountPreview()">
+                                </div>
+                            </div>
+                            <button type="button" class="btn-add-item" onclick="addOrderItem()">+ Add Another Item</button>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <button class="btn-run" type="submit" style="width: 100%;">✅ Create Sales Order</button>
                     </div>
                 </div>
             </form>
         </section>
     </div>
 
-    <div class="llm-grid">
+    <!-- New Member Modal -->
+    <div id="newMemberModal" class="modal-overlay">
+        <div class="modal-content">
+            <h3>✨ Create New Member</h3>
+            <form method="post" id="newMemberForm">
+                <input type="hidden" name="new_member_action" value="create_member">
+                <div class="input-wrapper" style="margin-bottom: 15px;">
+                    <span class="field-label">👤 MEMBER NAME</span>
+                    <input type="text" name="new_member_name" class="form-control" placeholder="Enter member name" required>
+                </div>
+                <div class="input-wrapper" style="margin-bottom: 15px;">
+                    <span class="field-label">📞 PHONE NUMBER</span>
+                    <input type="tel" name="new_member_phone" class="form-control" placeholder="Enter phone number" required>
+                </div>
+                <div class="modal-buttons">
+                    <button type="button" class="btn-secondary-custom" onclick="closeNewMemberModal()">Cancel</button>
+                    <button type="submit" class="btn-run">Create Member</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Purchase Order Creation Section -->
+    <div class="layout-grid" style="margin-bottom: 24px;">
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Operations</p>
+                    <h2>📦 Create Purchase Order (Supplier)</h2>
+                </div>
+            </div>
+            <form method="post" class="editor-form" id="purchaseForm">
+                <input type="hidden" name="purchase_action" value="create_purchase">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">🏭 SELECT SUPPLIER</span>
+                            <select name="purchase_supplier_id" class="form-control" required>
+                                <option value="">Select Supplier</option>
+                                <?php foreach ($suppliers as $sup): ?>
+                                <option value="<?=$sup['supplier_id']?>">
+                                    🏢 <?=htmlspecialchars($sup['supplier_name'], ENT_QUOTES, 'UTF-8')?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">📦 ITEMS TO PURCHASE</span>
+                            <div id="purchaseItemsContainer">
+                                <div class="item-row">
+                                    <select name="purchase_product_ids[]" class="form-control purchaseProductSelect" required>
+                                        <option value="">Select Product</option>
+                                        <?php foreach ($allProducts as $product): ?>
+                                        <option value="<?=$product['product_id']?>" data-cost="<?=$product['cost_price']?>">
+                                            <?=htmlspecialchars($product['product_name'], ENT_QUOTES, 'UTF-8')?> 
+                                            (Cost: $<?=$product['cost_price']?> | Stock: <?=$product['quantity']?>)
+                                        </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <input type="number" name="purchase_quantities[]" class="form-control" placeholder="Quantity" required min="1">
+                                </div>
+                            </div>
+                            <button type="button" class="btn-add-item" onclick="addPurchaseItem()">+ Add Another Product</button>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <button class="btn-run" type="submit" style="width: 100%;">✅ Create Purchase Order & Restock</button>
+                    </div>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Operations</p>
+                    <h2>🗑️ Delete Transaction Item</h2>
+                </div>
+            </div>
+            <form method="post" class="editor-form" onchange="this.submit()">
+                <input type="hidden" name="form_action" value="">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">📋 SELECT TRANSACTION</span>
+                            <select name="selected_transaction_for_delete" class="form-control" onchange="this.form.submit()">
+                                <option value="">Select Transaction to View Items</option>
+                                <?php foreach ($recentTransactions as $trans): ?>
+                                <option value="<?=$trans['transaction_id']?>" <?=($selectedTransactionForDelete == $trans['transaction_id']) ? 'selected' : ''?>>
+                                    Transaction #<?=$trans['transaction_id']?> - 
+                                    <?=htmlspecialchars($trans['employee_name'] ?? 'Unknown', ENT_QUOTES, 'UTF-8')?> - 
+                                    $<?=$trans['total_price']?> (<?=$trans['item_count']?> items)
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </form>
+            
+            <?php if ($selectedTransactionForDelete && !empty($transactionItems)): ?>
+            <form method="post" style="margin-top: 20px;">
+                <input type="hidden" name="delete_item_action" value="delete_item">
+                <input type="hidden" name="delete_transaction_id" value="<?=htmlspecialchars($selectedTransactionForDelete, ENT_QUOTES, 'UTF-8')?>">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">🗑️ SELECT ITEM TO REMOVE</span>
+                            <select name="delete_item_id" class="form-control" required>
+                                <option value="">Select Item to Remove</option>
+                                <?php foreach ($transactionItems as $item): ?>
+                                <option value="<?=$item['transaction_item_id']?>">
+                                    <?=htmlspecialchars($item['product_name'], ENT_QUOTES, 'UTF-8')?> - 
+                                    Qty: <?=$item['quantity']?> - 
+                                    Price: $<?=$item['unit_price']?> - 
+                                    Subtotal: $<?=$item['subtotal']?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <button class="btn-secondary-custom" type="submit" style="width: 100%; background: rgba(234, 143, 133, 0.15); border-color: var(--red);">Remove Selected Item & Restore Stock</button>
+                    </div>
+                </div>
+            </form>
+            <?php elseif ($selectedTransactionForDelete && empty($transactionItems)): ?>
+            <div class="alert-badge warning" style="margin-top: 20px;">
+                No items found in this transaction.
+            </div>
+            <?php endif; ?>
+        </section>
+    </div>
+
+    <!-- Delete Entire Transaction Section -->
+    <div class="layout-grid" style="margin-bottom: 24px;">
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Operations</p>
+                    <h2>🗑️ Delete Entire Transaction</h2>
+                </div>
+            </div>
+            <form method="post" class="editor-form">
+                <input type="hidden" name="delete_transaction_action" value="delete_full_transaction">
+                <div class="row g-3">
+                    <div class="col-12">
+                        <div class="input-wrapper">
+                            <span class="field-label">📋 SELECT TRANSACTION TO DELETE</span>
+                            <select name="delete_full_transaction_id" class="form-control" required>
+                                <option value="">Select Transaction to Delete</option>
+                                <?php foreach ($recentTransactions as $trans): ?>
+                                <option value="<?=$trans['transaction_id']?>">
+                                    Transaction #<?=$trans['transaction_id']?> - 
+                                    <?=htmlspecialchars($trans['employee_name'] ?? 'Unknown', ENT_QUOTES, 'UTF-8')?> - 
+                                    $<?=$trans['total_price']?> - 
+                                    <?=$trans['transaction_time']?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <button class="btn-secondary-custom" type="submit" style="width: 100%; background: rgba(234, 143, 133, 0.15); border-color: var(--red);">Delete Entire Transaction & Restore Stock</button>
+                    </div>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-kicker">Operations</p>
+                    <h2>📋 View Purchase Orders</h2>
+                </div>
+            </div>
+            <div class="table-shell" style="max-height: 300px; overflow-y: auto;">
+                <table class="table table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th>PO ID</th>
+                            <th>Supplier</th>
+                            <th>Employee</th>
+                            <th>Date</th>
+                            <th>Total</th>
+                            <th>Items</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($recentPurchaseOrders as $po): ?>
+                        <tr>
+                            <td>#<?=htmlspecialchars($po['purchase_order_id'], ENT_QUOTES, 'UTF-8')?></td>
+                            <td><?=htmlspecialchars($po['supplier_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8')?></td>
+                            <td><?=htmlspecialchars($po['employee_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8')?></td>
+                            <td><?=htmlspecialchars($po['receive_time'], ENT_QUOTES, 'UTF-8')?></td>
+                            <td>$<?=number_format($po['total_price'], 2)?></td>
+                            <td><?=htmlspecialchars($po['item_count'], ENT_QUOTES, 'UTF-8')?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php if (empty($recentPurchaseOrders)): ?>
+                        <tr>
+                            <td colspan="6" style="text-align: center;">No purchase orders found</td>
+                        </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <!-- Recent Sales Transactions Table -->
+    <div class="result-panel" style="margin-bottom: 24px;" id="result-section">
+        <div class="result-header">
+            <div>
+                <p class="panel-kicker">Sales History</p>
+                <h2>🛒 Recent Sales Transactions 
+                    <?php if ($lastCreatedTransaction): ?>
+                        <span class="new-transaction-badge">New! Transaction #<?=$lastCreatedTransaction?></span>
+                    <?php endif; ?>
+                </h2>
+            </div>
+            <div class="result-meta"><?=count($recentTransactions)?> transactions</div>
+        </div>
+        <div class="table-shell">
+            <table class="table table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <th>Transaction ID</th>
+                        <th>Cashier</th>
+                        <th>Customer</th>
+                        <th>Date & Time</th>
+                        <th>Subtotal</th>
+                        <th>Discount</th>
+                        <th>Final Amount</th>
+                        <th>Payment Method</th>
+                        <th>Items</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($recentTransactions as $trans): ?>
+                    <tr <?=($lastCreatedTransaction == $trans['transaction_id']) ? 'style="background: rgba(123, 195, 155, 0.15); border-left: 3px solid #7bc39b;"' : ''?>>
+                        <td>#<?=htmlspecialchars($trans['transaction_id'], ENT_QUOTES, 'UTF-8')?>
+                            <?php if ($lastCreatedTransaction == $trans['transaction_id']): ?>
+                                <span class="new-transaction-badge" style="margin-left: 8px;">NEW</span>
+                            <?php endif; ?>
+                        </td>
+                        <td><?=htmlspecialchars($trans['employee_name'] ?? 'N/A', ENT_QUOTES, 'UTF-8')?></td>
+                        <td><?=htmlspecialchars($trans['member_name'] ?? 'Guest', ENT_QUOTES, 'UTF-8')?></td>
+                        <td><?=htmlspecialchars($trans['transaction_time'], ENT_QUOTES, 'UTF-8')?></td>
+                        <td>$<?=number_format($trans['total_price'] + $trans['discount'], 2)?></td>
+                        <td>-$<?=number_format($trans['discount'], 2)?></td>
+                        <td><strong>$<?=number_format($trans['total_price'], 2)?></strong></td>
+                        <td><?=htmlspecialchars($trans['payment_method'], ENT_QUOTES, 'UTF-8')?></td>
+                        <td><?=htmlspecialchars($trans['item_count'], ENT_QUOTES, 'UTF-8')?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($recentTransactions)): ?>
+                    <tr>
+                        <td colspan="9" style="text-align: center;">No sales transactions found</td>
+                    </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Query Results Section (for SQL queries and newly created transaction details) -->
+    <?php if ($cols && !empty($rows)): ?>
+    <div class="result-panel" style="margin-bottom: 24px;">
+        <div class="result-header">
+            <div>
+                <p class="panel-kicker">Query Results</p>
+                <h2>📊 Transaction Details</h2>
+            </div>
+            <div class="result-meta"><?=count($rows)?> rows, <?=count($cols)?> columns</div>
+        </div>
+        <div class="table-shell">
+            <table class="table table-hover mb-0 align-middle">
+                <thead>
+                    <tr>
+                        <?php foreach ($cols as $c): ?>
+                            <th><?=htmlspecialchars($c, ENT_QUOTES, 'UTF-8')?></th>
+                        <?php endforeach ?>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($rows as $r): ?>
+                    <tr>
+                        <?php foreach ($r as $key => $v): ?>
+                            <?php if ($key === 'items' && is_string($v)): ?>
+                                <td>
+                                    <details>
+                                        <summary style="color: var(--green); cursor: pointer;">📋 View Items</summary>
+                                        <pre style="margin-top: 8px; font-size: 0.8rem; color: var(--muted);"><?=htmlspecialchars(json_decode($v) ? json_encode(json_decode($v), JSON_PRETTY_PRINT) : $v, ENT_QUOTES, 'UTF-8')?></pre>
+                                    </details>
+                                </td>
+                            <?php else: ?>
+                                <td><?=htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8')?></td>
+                            <?php endif; ?>
+                        <?php endforeach ?>
+                    </tr>
+                    <?php endforeach ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <div class="llm-grid" id="llm-section">
         <section class="panel">
             <div class="panel-header">
                 <div>
@@ -1195,7 +2009,7 @@ if (!$conn) {
 
             <form method="post" class="editor-form">
                 <input type="hidden" name="form_action" value="llm_query">
-                <textarea name="llm_question" class="form-control" rows="5" placeholder="Example: What are the current active employees? Which products have low stock? How are recent purchase orders and sales?"><?=htmlspecialchars($llmQuestion, ENT_QUOTES, 'UTF-8')?></textarea>
+                <textarea name="llm_question" class="form-control" rows="5" placeholder="Example: What are the current active employees? Which products have low stock? How are recent sales transactions? Which member has the most points?"><?=htmlspecialchars($llmQuestion, ENT_QUOTES, 'UTF-8')?></textarea>
                 <div class="action-row">
                     <button class="btn-run" type="submit">LLM Query</button>
                     <span class="helper-text">The database context is injected when you click the button.</span>
@@ -1233,54 +2047,19 @@ if (!$conn) {
         </section>
     <?php endif ?>
 
-    <?php if ($success): ?>
+    <?php if ($success && !$showTransactionResult): ?>
         <section class="message-panel success">
             <p class="panel-kicker">Execution Feedback</p>
             <h2 class="message-title">Success</h2>
             <p class="message-body"><?=htmlspecialchars($success, ENT_QUOTES, 'UTF-8')?></p>
         </section>
     <?php endif ?>
-
-    <?php if ($cols): ?>
-        <section class="result-panel">
-            <div class="result-header">
-                <div>
-                    <p class="panel-kicker">Result Grid</p>
-                    <h2>Query Results</h2>
-                </div>
-                <div class="result-meta"><?=count($rows)?> rows, <?=count($cols)?> columns</div>
-            </div>
-            <div class="table-shell">
-                <table class="table table-hover mb-0 align-middle">
-                    <thead>
-                        <tr>
-                            <?php foreach ($cols as $c): ?>
-                                <th><?=htmlspecialchars($c, ENT_QUOTES, 'UTF-8')?></th>
-                            <?php endforeach ?>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($rows as $r): ?>
-                            <tr>
-                                <?php foreach ($r as $v): ?>
-                                    <td><?=htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8')?></td>
-                                <?php endforeach ?>
-                            </tr>
-                        <?php endforeach ?>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    <?php elseif ($sql && !$error && !$success): ?>
-        <section class="message-panel success">
-            <p class="panel-kicker">Execution Feedback</p>
-            <h2 class="message-title">Success</h2>
-            <p class="message-body">Statement executed successfully, no result set to display.</p>
-        </section>
-    <?php endif ?>
 </div>
 
 <script>
+let itemCount = 1;
+let purchaseItemCount = 1;
+
 function setSql(sql) {
     const textarea = document.querySelector('[name=sql]');
     textarea.value = sql;
@@ -1288,10 +2067,101 @@ function setSql(sql) {
     textarea.setSelectionRange(textarea.value.length, textarea.value.length);
 }
 
-// Chart.js initialization
+function openNewMemberModal() {
+    document.getElementById('newMemberModal').style.display = 'flex';
+}
+
+function closeNewMemberModal() {
+    document.getElementById('newMemberModal').style.display = 'none';
+    document.getElementById('newMemberForm').reset();
+}
+
+function addOrderItem() {
+    const container = document.getElementById('itemsContainer');
+    const originalRow = container.querySelector('.item-row');
+    const newRow = originalRow.cloneNode(true);
+    
+    newRow.querySelector('select').value = '';
+    newRow.querySelector('input').value = '';
+    
+    newRow.querySelector('select').addEventListener('change', updateDiscountPreview);
+    newRow.querySelector('input').addEventListener('change', updateDiscountPreview);
+    newRow.querySelector('input').addEventListener('keyup', updateDiscountPreview);
+    
+    container.appendChild(newRow);
+    itemCount++;
+}
+
+function addPurchaseItem() {
+    const container = document.getElementById('purchaseItemsContainer');
+    const originalRow = container.querySelector('.item-row');
+    const newRow = originalRow.cloneNode(true);
+    
+    newRow.querySelector('select').value = '';
+    newRow.querySelector('input').value = '';
+    
+    container.appendChild(newRow);
+    purchaseItemCount++;
+}
+
+function calculateSubtotal() {
+    let subtotal = 0;
+    const productSelects = document.querySelectorAll('.productSelect');
+    const quantityInputs = document.querySelectorAll('.quantityInput');
+    
+    for (let i = 0; i < productSelects.length; i++) {
+        const select = productSelects[i];
+        const quantity = parseInt(quantityInputs[i]?.value) || 0;
+        const selectedOption = select.options[select.selectedIndex];
+        const price = selectedOption ? parseFloat(selectedOption.dataset.price) || 0 : 0;
+        
+        if (quantity > 0 && price > 0) {
+            subtotal += price * quantity;
+        }
+    }
+    return subtotal;
+}
+
+function updateDiscountPreview() {
+    const subtotal = calculateSubtotal();
+    const discount = parseFloat(document.getElementById('discountInput')?.value) || 0;
+    const finalAmount = Math.max(0, subtotal - discount);
+    
+    const previewDiv = document.getElementById('discountPreview');
+    if (previewDiv) {
+        previewDiv.innerHTML = `💰 Subtotal: $${subtotal.toFixed(2)} → 🏷️ Discount: -$${discount.toFixed(2)} → ✅ Final: $${finalAmount.toFixed(2)}`;
+        if (discount > subtotal) {
+            previewDiv.style.color = '#ea8f85';
+        } else {
+            previewDiv.style.color = '#7bc39b';
+        }
+    }
+}
+
+// Close modal when clicking outside
+document.addEventListener('click', function(event) {
+    const modal = document.getElementById('newMemberModal');
+    if (event.target === modal) {
+        closeNewMemberModal();
+    }
+});
+
 document.addEventListener('DOMContentLoaded', function() {
+    const productSelects = document.querySelectorAll('.productSelect');
+    const quantityInputs = document.querySelectorAll('.quantityInput');
+    
+    productSelects.forEach(select => {
+        select.addEventListener('change', updateDiscountPreview);
+    });
+    
+    quantityInputs.forEach(input => {
+        input.addEventListener('change', updateDiscountPreview);
+        input.addEventListener('keyup', updateDiscountPreview);
+    });
+    
+    updateDiscountPreview();
+    
     <?php
-    // Get category distribution data
     $categoryData = selectAllAssoc($conn, "
         SELECT c.category_name, COUNT(p.product_id) as product_count
         FROM category c
@@ -1303,7 +2173,6 @@ document.addEventListener('DOMContentLoaded', function() {
     $categoryNames = array_column($categoryData, 'category_name');
     $categoryCounts = array_column($categoryData, 'product_count');
     
-    // Get top 10 products by stock
     $topProducts = selectAllAssoc($conn, "
         SELECT p.product_name, i.quantity
         FROM product p
@@ -1316,7 +2185,6 @@ document.addEventListener('DOMContentLoaded', function() {
     $productQuantities = array_column($topProducts, 'quantity');
     ?>
     
-    // Stock Distribution Chart
     const stockCtx = document.getElementById('stockChart').getContext('2d');
     new Chart(stockCtx, {
         type: 'bar',
@@ -1352,7 +2220,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Category Distribution Pie Chart
     const categoryCtx = document.getElementById('categoryChart').getContext('2d');
     new Chart(categoryCtx, {
         type: 'pie',
@@ -1388,5 +2255,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 </script>
+<?=$scrollScript?>
 </body>
 </html>
