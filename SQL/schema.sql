@@ -92,7 +92,7 @@ CREATE TABLE inventory (
     inventory_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     product_id INT UNSIGNED NOT NULL,
     quantity INT NOT NULL DEFAULT 0,
-    min_stock INT NOT NULL DEFAULT 0,
+    min_stock INT NOT NULL DEFAULT 20,
     last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_inventory_product UNIQUE (product_id),
     CONSTRAINT chk_inventory_quantity_nonnegative CHECK (quantity >= 0),
